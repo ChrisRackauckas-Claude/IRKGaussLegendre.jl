@@ -13,16 +13,22 @@ on:
 jobs:
   test:
     # Disabled: the strict (allow-reresolve: false) downgrade cannot resolve at
-    # the current floors. Pinning the direct deps to their floors transitively
-    # locks LogExpFunctions to 1.0.1 (via the DiffEqBase 7.0.0 / NonlinearSolveBase
-    # stack). LogExpFunctions 1.0.1 caps ForwardDiff at <= 0.10.22, but the test
-    # extras (DiffEqDevTools -> NLsolve -> NLSolversBase) together with the floored
-    # DifferentiationInterface / RecursiveArrayTools / PreallocationTools require
-    # ForwardDiff >= 0.10.38 (i.e. 1.x). Those windows are disjoint, so ForwardDiff
-    # has no valid version and the test environment is unsatisfiable. The only ways
-    # to make it resolve are allow-reresolve: true (relaxes the transitive pin to
-    # LogExpFunctions 0.3.29) or lowering a floor; both are disallowed here. Re-enable
-    # once the floored stack no longer forces LogExpFunctions 1.0.1.
+    # any direct-dep floors (verified from the registry floors up to the latest
+    # direct versions). With direct [deps] pinned and transitive deps floated to
+    # latest, the DiffEqBase 7 / NonlinearSolveBase 2.30 stack pulls LogExpFunctions
+    # to its latest 1.0.1. LogExpFunctions 1.0.1 is incompatible with ForwardDiff
+    # >= 0.10.23 (those require LogExpFunctions 0.3), so it caps ForwardDiff at
+    # <= 0.10.22. But NonlinearSolveBase 2.30.3 plus the test extras
+    # (DiffEqDevTools -> NLsolve -> NLSolversBase, DifferentiationInterface,
+    # RecursiveArrayTools, PreallocationTools) all require ForwardDiff >= 0.10.36
+    # (i.e. 1.x). Those windows are disjoint, so ForwardDiff has no valid version
+    # and the test environment is unsatisfiable. No raised direct-dep floor reaches
+    # it (nothing direct caps the transitive LogExpFunctions; raising direct floors
+    # only pushes NonlinearSolveBase higher, and it permits 1.x at every relevant
+    # version). The only ways to resolve are allow-reresolve: true (relaxes the
+    # transitive pin to LogExpFunctions 0.3.29) or lowering/adding a floor; both are
+    # disallowed here. Re-enable once the floored stack no longer forces
+    # LogExpFunctions 1.0.1.
     if: false
     uses: "SciML/.github/.github/workflows/downgrade.yml@v1"
     with:
