@@ -150,8 +150,10 @@ Hamiltonian and other geometric-structure-preserving problems.
     initialization (default `true`).
 
 Step-size control and tolerances (`dt`, `adaptive`, `abstol`, `reltol`,
-`maxiters`, `saveat`, `save_everystep`) are passed to `solve` as common solver
-keyword arguments.
+`maxiters`, `saveat`, `save_everystep`, `dense`) are passed to `solve` as common
+solver keyword arguments. When every step is saved (the default), the solution is
+dense: `sol(t)` evaluates the collocation polynomial of the step containing `t`,
+the same polynomial used to compute `saveat` values.
 
 # Example
 
@@ -206,6 +208,7 @@ function SciMLBase.__solve(
         maxiters = 100,
         save_everystep = true,
         saveat = nothing,
+        dense = save_everystep && saveat === nothing,
         adaptive = true,
         reltol = eltype(tspanType)(1.0e-6),
         abstol = eltype(tspanType)(1.0e-6),
@@ -498,6 +501,10 @@ function SciMLBase.__solve(
         end
     end
 
+    dense = dense && save_everystep
+    hh = tType[]
+    Ls = Matrix{eltype(u0)}[]
+
     #   initialization output variables
     uu = uType[]
     tt = tType[]
@@ -540,6 +547,11 @@ function SciMLBase.__solve(
             error_warn = 1
             cont = false
             break
+        end
+
+        if dense
+            push!(hh, dts[2])
+            _store_step_L!(Ls, L, indices, s, use_simd)
         end
 
         if tj[1] == tf
@@ -628,9 +640,17 @@ function SciMLBase.__solve(
         push!(uu, copy(uj))
         push!(tt, tj[1])
 
-        sol = SciMLBase.build_solution(
-            prob, alg, tt, uu, stats = stats, retcode = ReturnCode.Success
-        )
+        if dense
+            interp = IRKGLInterpolation(tt, uu, hh, Ls, copy(X2), copy(Y2))
+            sol = SciMLBase.build_solution(
+                prob, alg, tt, uu, stats = stats, retcode = ReturnCode.Success,
+                dense = true, interp = interp
+            )
+        else
+            sol = SciMLBase.build_solution(
+                prob, alg, tt, uu, stats = stats, retcode = ReturnCode.Success
+            )
+        end
     end
 
     return (sol)
