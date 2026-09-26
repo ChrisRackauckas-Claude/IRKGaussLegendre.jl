@@ -5,10 +5,11 @@
 #   EstimateCoeffs!
 
 function PolInterp(
-        X::AbstractVector{ctype},
-        Y::AbstractMatrix{ctype},
-        Z::AbstractVector{ctype}
-    ) where {ctype}
+        X::AbstractVector,
+        Y::AbstractMatrix,
+        Z::AbstractVector
+    )
+    ctype = promote_type(eltype(X), eltype(Y), eltype(Z))
     N = length(X)
     M = length(Z)
     K = size(Y, 1)
@@ -19,7 +20,7 @@ function PolInterp(
 
     @inbounds begin
         for i in 1:N
-            lag = 1.0
+            lag = one(ctype)
             for j in 1:N
                 if (j != i)
                     lag *= X[i] - X[j]

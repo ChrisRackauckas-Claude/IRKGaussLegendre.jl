@@ -1,11 +1,19 @@
 using Test
-using IRKGaussLegendre, SciMLBase
+using IRKGaussLegendre, SciMLBase, ForwardDiff
 
 function lotka_volterra!(du, u, p, t)
     du[1] = 1.5 * u[1] - u[1] * u[2]
     du[2] = -3 * u[2] + u[1] * u[2]
     return nothing
 end
+
+function harmonic!(du, u, p, t)
+    du[1] = u[2]
+    du[2] = -u[1]
+    return nothing
+end
+
+exponential!(du, u, p, t) = (du .= u)
 
 maxdiff(a, b) = maximum(maximum(abs.(x .- y)) for (x, y) in zip(a, b))
 
@@ -53,4 +61,60 @@ maxdiff(a, b) = maximum(maximum(abs.(x .- y)) for (x, y) in zip(a, b))
         sa = solve(prob, IRKGL16(), saveat = ts)
         @test !sa.dense
     end
+end
+
+@testset "Dense output of second_order_ode solutions" begin
+    prob = ODEProblem(harmonic!, [1.0, 0.0], (0.0, 2.0))
+    @testset "simd=$simd fseq=$fseq adaptive=$adaptive" for simd in (false, true),
+            fseq in (false, true), adaptive in (false, true)
+
+        sol = solve(
+            prob, IRKGL16(; simd, fseq, second_order_ode = true);
+            dt = 0.2, adaptive, abstol = 1.0e-12, reltol = 1.0e-12
+        )
+        ts = 0.05:0.1:1.95
+        err = maximum(maximum(abs.(sol(t) .- [cos(t), -sin(t)])) for t in ts)
+        @test err < 1.0e-7
+        # The collocation polynomial of each step must meet the saved endpoint
+        # values on both sides.
+        for i in 2:length(sol.t)
+            @test sol(prevfloat(sol.t[i])) ≈ sol.u[i] atol = 1.0e-10
+        end
+        for i in 1:(length(sol.t) - 1)
+            @test sol(nextfloat(sol.t[i])) ≈ sol.u[i] atol = 1.0e-10
+        end
+        # Position derivative is the interpolated velocity.
+        for t in (0.3, 0.7, 1.3)
+            @test sol(t, Val{1}) ≈ [-sin(t), -cos(t)] rtol = 1.0e-9
+        end
+    end
+end
+
+@testset "First derivative of dense output" begin
+    prob = ODEProblem(exponential!, [1.0], (0.0, 1.0))
+    @testset "simd=$simd" for simd in (false, true)
+        sol = solve(prob, IRKGL16(; simd), dt = 0.25, adaptive = false)
+        for t in (0.1, 0.3, 0.6, 0.9)
+            @test sol(t, Val{1})[1] ≈ exp(t) rtol = 1.0e-9
+        end
+        # Derivative at a saved endpoint uses the step polynomial, not the
+        # saved value shortcut.
+        @test sol(0.5, Val{1})[1] ≈ exp(0.5) rtol = 1.0e-9
+        @test sol(0.5, Val{1}; continuity = :right)[1] ≈ exp(0.5) rtol = 1.0e-9
+        # Vector-time, component selection, and in-place calls.
+        @test sol([0.3, 0.7], Val{1}).u ≈ [[exp(0.3)], [exp(0.7)]] rtol = 1.0e-9
+        @test sol(0.3, Val{1}; idxs = 1) ≈ exp(0.3) rtol = 1.0e-9
+        out = zeros(1)
+        sol(out, 0.3, Val{1})
+        @test out[1] ≈ exp(0.3) rtol = 1.0e-9
+        @test_throws ArgumentError sol(0.3, Val{2})
+    end
+end
+
+@testset "AD through interpolation time" begin
+    prob = ODEProblem(exponential!, [1.0], (0.0, 1.0))
+    sol = solve(prob, IRKGL16(), dt = 0.25, adaptive = false)
+    @test ForwardDiff.derivative(t -> sol(t)[1], 0.3) ≈ exp(0.3) rtol = 1.0e-9
+    # A dual-valued query at a saved time still flows through the polynomial.
+    @test ForwardDiff.derivative(t -> sol(t)[1], 0.5) ≈ exp(0.5) rtol = 1.0e-9
 end

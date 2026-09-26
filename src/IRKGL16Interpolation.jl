@@ -4,8 +4,19 @@
 Dense output of an [`IRKGL16`](@ref) solution: on each step `[t[i], t[i+1]]` the
 solution is evaluated with the collocation polynomial of that step (the same
 polynomial used for `saveat`), `u[i] + sum_j kappa_j(θ) * L[i][j, :]`, where
-`θ = |t - t[i]| / h[i]`. At the saved time points the saved values are returned.
-Only the solution itself (`Val{0}`) can be interpolated.
+`θ = (t - t[i]) / h[i]` and `h[i]` is the signed length of the step. At the saved
+time points the saved values are returned.
+
+For `second_order_ode` solutions (state `[q; v]`, `q'' = f(u)`) the steppers
+only converge the velocity half of `L`, so the position block is instead
+evaluated with the Nyström interpolant
+`q(t) = q[i] + (t - t[i]) * v[i] + h[i] * sum_j κ̃_j(θ) * L[i][j, v-block]`,
+where `κ̃_j` interpolates the double-integral coefficients `eta` on the nodes
+`[0, c, 1]` — including the endpoint value `κ̃_j(1) = 1 - c_j`, which makes the
+interpolant agree with the saved endpoint values.
+
+`Val{0}` interpolates the solution and `Val{1}` its first derivative; higher
+derivative orders throw an `ArgumentError`.
 """
 struct IRKGLInterpolation{tType, uType, LType} <: SciMLBase.AbstractDiffEqInterpolation
     t::Vector{tType}
@@ -14,6 +25,11 @@ struct IRKGLInterpolation{tType, uType, LType} <: SciMLBase.AbstractDiffEqInterp
     L::Vector{LType}
     X2::Vector{tType}
     Y2::Matrix{tType}
+    X3::Vector{tType}
+    Y3::Matrix{tType}
+    XD::Vector{tType}
+    YD::Matrix{tType}
+    lenq::Int
 end
 
 SciMLBase.interp_summary(::IRKGLInterpolation) = "Gauss-Legendre collocation polynomial"
@@ -36,60 +52,113 @@ function _store_step_L!(Ls, L, indices, s, use_simd)
     return nothing
 end
 
-function _irkgl_interp_point(id::IRKGLInterpolation, tval, idxs)
+function _irkgl_interp_point(
+        id::IRKGLInterpolation, tval, idxs, ::Type{Val{D}}, continuity::Symbol
+    ) where {D}
+    if D > 1
+        throw(
+            ArgumentError(
+                "IRKGL16 dense output only supports interpolating the solution " *
+                    "(Val{0}) and its first derivative (Val{1}), got Val{$D}."
+            )
+        )
+    end
     t = id.t
     tdir = sign(t[end] - t[1])
     if tdir * tval > tdir * t[end] || tdir * tval < tdir * t[1]
         error("Solution interpolation cannot extrapolate outside of the time span [$(t[1]), $(t[end])].")
     end
     i = searchsortedfirst(t, tval; rev = tdir < 0)
-    if t[i] == tval
+    if D == 0 && tval isa AbstractFloat && t[i] == tval
         u = id.u[i]
+        return idxs === nothing ? copy(u) : u[idxs]
+    end
+    step = if t[i] == tval
+        i == firstindex(t) ? i : (continuity === :right && i < lastindex(t) ? i : i - 1)
     else
-        step = i - 1
-        u0 = id.u[step]
-        Lstep = id.L[step]
-        θ = convert(eltype(id.X2), abs((tval - t[step]) / id.h[step]))
-        kappa = PolInterp(id.X2, id.Y2, [θ])
-        u = copy(u0)
+        i - 1
+    end
+    u0 = id.u[step]
+    Lstep = id.L[step]
+    h = id.h[step]
+    θ = (tval - t[step]) / h
+    s = size(Lstep, 1)
+    lenq = id.lenq
+    u = similar(u0, promote_type(eltype(u0), typeof(θ)))
+    if D == 0
+        κv = vec(PolInterp(id.X2, id.Y2, [θ]))
+        if lenq > 0
+            κq = vec(PolInterp(id.X3, id.Y3, [θ]))
+            for n in 1:lenq
+                nv = n + lenq
+                acc = κq[1] * Lstep[1, nv]
+                for j in 2:s
+                    acc = muladd(κq[j], Lstep[j, nv], acc)
+                end
+                u[n] = u0[n] + (tval - t[step]) * u0[nv] + h * acc
+            end
+        end
         for (n, k) in enumerate(eachindex(u0))
-            acc = kappa[1] * Lstep[1, n]
-            for j in 2:size(Lstep, 1)
-                acc = muladd(kappa[j], Lstep[j, n], acc)
+            lenq > 0 && n <= lenq && continue
+            acc = κv[1] * Lstep[1, n]
+            for j in 2:s
+                acc = muladd(κv[j], Lstep[j, n], acc)
             end
             u[k] = u0[k] + acc
         end
+    else
+        κd = vec(PolInterp(id.XD, id.YD, [θ]))
+        if lenq > 0
+            κq = vec(PolInterp(id.X2, id.Y2, [θ]))
+            for n in 1:lenq
+                nv = n + lenq
+                acc = κq[1] * Lstep[1, nv]
+                for j in 2:s
+                    acc = muladd(κq[j], Lstep[j, nv], acc)
+                end
+                u[n] = u0[nv] + acc
+            end
+        end
+        for (n, k) in enumerate(eachindex(u0))
+            lenq > 0 && n <= lenq && continue
+            acc = κd[1] * Lstep[1, n]
+            for j in 2:s
+                acc = muladd(κd[j], Lstep[j, n], acc)
+            end
+            u[k] = acc / h
+        end
     end
-    return idxs === nothing ? copy(u) : u[idxs]
+    return idxs === nothing ? u : u[idxs]
 end
 
-function _check_deriv(deriv)
-    return deriv === Val{0} ||
-        throw(ArgumentError("IRKGL16 dense output only supports interpolating the solution (Val{0}), got $deriv."))
+_irkgl_interp(id, tval::Number, idxs, deriv, continuity) =
+    _irkgl_interp_point(id, tval, idxs, deriv, continuity)
+function _irkgl_interp(id, tvals, idxs, deriv, continuity)
+    return DiffEqArray(
+        [_irkgl_interp_point(id, tv, idxs, deriv, continuity) for tv in tvals],
+        tvals
+    )
 end
 
-_irkgl_interp(id, tval::Number, idxs) = _irkgl_interp_point(id, tval, idxs)
-function _irkgl_interp(id, tvals, idxs)
-    return DiffEqArray([_irkgl_interp_point(id, tv, idxs) for tv in tvals], tvals)
-end
-
-function _irkgl_interp!(val, id, tval::Number, idxs)
-    val .= _irkgl_interp_point(id, tval, idxs)
+function _irkgl_interp!(val, id, tval::Number, idxs, deriv, continuity)
+    val .= _irkgl_interp_point(id, tval, idxs, deriv, continuity)
     return val
 end
-function _irkgl_interp!(vals, id, tvals, idxs)
+function _irkgl_interp!(vals, id, tvals, idxs, deriv, continuity)
     for (j, tv) in enumerate(tvals)
-        vals[j] = _irkgl_interp_point(id, tv, idxs)
+        vals[j] = _irkgl_interp_point(id, tv, idxs, deriv, continuity)
     end
     return vals
 end
 
-function (id::IRKGLInterpolation)(tvals, idxs, deriv, p, continuity::Symbol)
-    _check_deriv(deriv)
-    return _irkgl_interp(id, tvals, idxs)
+function (id::IRKGLInterpolation)(
+        tvals, idxs, deriv::D, p, continuity::Symbol = :left
+    ) where {D}
+    return _irkgl_interp(id, tvals, idxs, deriv, continuity)
 end
 
-function (id::IRKGLInterpolation)(val, tvals, idxs, deriv, p, continuity::Symbol)
-    _check_deriv(deriv)
-    return _irkgl_interp!(val, id, tvals, idxs)
+function (id::IRKGLInterpolation)(
+        val, tvals, idxs, deriv::D, p, continuity::Symbol = :left
+    ) where {D}
+    return _irkgl_interp!(val, id, tvals, idxs, deriv, continuity)
 end
