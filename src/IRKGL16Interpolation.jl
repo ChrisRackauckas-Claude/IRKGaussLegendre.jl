@@ -2,10 +2,11 @@
     IRKGLInterpolation
 
 Dense output of an [`IRKGL16`](@ref) solution: on each step `[t[i], t[i+1]]` the
-solution is evaluated with the collocation polynomial of that step (the same
-polynomial used for `saveat`), `u[i] + sum_j kappa_j(θ) * L[i][j, :]`, where
-`θ = (t - t[i]) / h[i]` and `h[i]` is the signed length of the step. At the saved
-time points the saved values are returned.
+solution is evaluated with the collocation polynomial of that step,
+`u[i] + sum_j kappa_j(θ) * L[i][j, :]`, where `θ = (t - t[i]) / h[i]` and `h[i]`
+is the signed length of the step — the same polynomial the `saveat` path uses,
+except for the position block of `second_order_ode` solutions described below.
+At the saved time points the saved values are returned.
 
 For `second_order_ode` solutions (state `[q; v]`, `q'' = f(u)`) the steppers
 only converge the velocity half of `L`, so the position block is instead
@@ -13,7 +14,10 @@ evaluated with the Nyström interpolant
 `q(t) = q[i] + (t - t[i]) * v[i] + h[i] * sum_j κ̃_j(θ) * L[i][j, v-block]`,
 where `κ̃_j` interpolates the double-integral coefficients `eta` on the nodes
 `[0, c, 1]` — including the endpoint value `κ̃_j(1) = 1 - c_j`, which makes the
-interpolant agree with the saved endpoint values.
+interpolant agree with the saved endpoint values. `κ̃` is not the exact double
+integral of the acceleration polynomial (they differ in the highest-degree
+term), so `Val{1}` differentiates `κ̃` itself:
+`q'(t) = v[i] + sum_j κ̃'_j(θ) * L[i][j, v-block]`.
 
 `Val{0}` interpolates the solution and `Val{1}` its first derivative; higher
 derivative orders throw an `ArgumentError`.
@@ -109,12 +113,12 @@ function _irkgl_interp_point(
     else
         κd = vec(PolInterp(id.XD, id.YD, [θ]))
         if lenq > 0
-            κq = vec(PolInterp(id.X2, id.Y2, [θ]))
+            κqd = vec(PolInterpDer(id.X3, id.Y3, [θ]))
             for n in 1:lenq
                 nv = n + lenq
-                acc = κq[1] * Lstep[1, nv]
+                acc = κqd[1] * Lstep[1, nv]
                 for j in 2:s
-                    acc = muladd(κq[j], Lstep[j, nv], acc)
+                    acc = muladd(κqd[j], Lstep[j, nv], acc)
                 end
                 u[n] = u0[nv] + acc
             end

@@ -83,9 +83,41 @@ end
         for i in 1:(length(sol.t) - 1)
             @test sol(nextfloat(sol.t[i])) ≈ sol.u[i] atol = 1.0e-10
         end
-        # Position derivative is the interpolated velocity.
+        # Position components of Val{1} carry the derivative of the position
+        # interpolant, which approximates the true velocity.
         for t in (0.3, 0.7, 1.3)
             @test sol(t, Val{1}) ≈ [-sin(t), -cos(t)] rtol = 1.0e-9
+        end
+    end
+end
+
+@testset "Val{1} differentiates the second-order position interpolant" begin
+    poly7!(du, u, p, t) = (du[1] = u[2]; du[2] = t^7; nothing)
+    @testset "polynomial forcing, simd=$simd" for simd in (false, true)
+        sol = solve(
+            ODEProblem(poly7!, [0.0, 0.0], (0.0, 1.0)),
+            IRKGL16(; simd, second_order_ode = true); dt = 1.0, adaptive = false
+        )
+        for t in (0.13, 0.37, 0.63, 0.87)
+            @test sol(t, Val{1}) ≈ ForwardDiff.derivative(t -> sol(t), t) rtol =
+                1.0e-8 atol = 1.0e-12
+        end
+    end
+
+    # A single oscillator step of size 2 makes the position interpolant's
+    # derivative differ measurably from the velocity interpolant.
+    @testset "oscillator h=2, simd=$simd backwards=$backwards" for simd in (false, true),
+            backwards in (false, true)
+
+        a, b = backwards ? (2.0, 0.0) : (0.0, 2.0)
+        sol = solve(
+            ODEProblem(harmonic!, [cos(a + 0.7), -sin(a + 0.7)], (a, b)),
+            IRKGL16(; simd, second_order_ode = true);
+            dt = 2.0, adaptive = false, maxiters = 1000
+        )
+        for t in a .+ (b - a) .* (0.13, 0.37, 0.63, 0.87)
+            @test sol(t, Val{1}) ≈ ForwardDiff.derivative(t -> sol(t), t) rtol =
+                1.0e-8 atol = 1.0e-12
         end
     end
 end

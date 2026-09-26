@@ -152,10 +152,11 @@ Hamiltonian and other geometric-structure-preserving problems.
 Step-size control and tolerances (`dt`, `adaptive`, `abstol`, `reltol`,
 `maxiters`, `saveat`, `save_everystep`, `dense`) are passed to `solve` as common
 solver keyword arguments. When every step is saved (the default), the solution is
-dense: `sol(t)` evaluates the collocation polynomial of the step containing `t`,
-the same polynomial used to compute `saveat` values, and `sol(t, Val{1})`
-evaluates its first derivative. With `dense = false` the solution interpolates
-linearly between saved points.
+dense: `sol(t)` evaluates the collocation polynomial of the step containing `t`
+(the polynomial the `saveat` path uses, except that `second_order_ode` position
+components use the Nyström interpolant instead), and `sol(t, Val{1})` evaluates
+the first derivative of that interpolant. With `dense = false` the solution
+interpolates linearly between saved points.
 
 # Example
 
