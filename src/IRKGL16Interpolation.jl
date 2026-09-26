@@ -20,7 +20,10 @@ term), so `Val{1}` differentiates `κ̃` itself:
 `q'(t) = v[i] + sum_j κ̃'_j(θ) * L[i][j, v-block]`.
 
 `Val{0}` interpolates the solution and `Val{1}` its first derivative; higher
-derivative orders throw an `ArgumentError`.
+derivative orders throw an `ArgumentError`. A query time carrying AD
+partials (e.g. `ForwardDiff.Dual`) propagates through the polynomial, and at a
+saved time the step is selected on the primal value with the same `continuity`
+rule as a `Float64` query.
 """
 struct IRKGLInterpolation{tType, uType, LType} <: SciMLBase.AbstractDiffEqInterpolation
     t::Vector{tType}
@@ -69,15 +72,20 @@ function _irkgl_interp_point(
     end
     t = id.t
     tdir = sign(t[end] - t[1])
-    if tdir * tval > tdir * t[end] || tdir * tval < tdir * t[1]
+    # Bounds checks, interval lookup, and knot equality run on the primal value
+    # of the query time: dual-numbered queries compare on their partials too,
+    # which would sort a knot query past the knot and bypass the `continuity`
+    # branch. The polynomial itself still sees `tval`, so derivatives propagate.
+    tv = SciMLBase.unitfulvalue(tval)
+    if tdir * tv > tdir * t[end] || tdir * tv < tdir * t[1]
         error("Solution interpolation cannot extrapolate outside of the time span [$(t[1]), $(t[end])].")
     end
-    i = searchsortedfirst(t, tval; rev = tdir < 0)
-    if D == 0 && tval isa AbstractFloat && t[i] == tval
+    i = searchsortedfirst(t, tv; rev = tdir < 0)
+    if D == 0 && tval isa AbstractFloat && t[i] == tv
         u = id.u[i]
         return idxs === nothing ? copy(u) : u[idxs]
     end
-    step = if t[i] == tval
+    step = if t[i] == tv
         i == firstindex(t) ? i : (continuity === :right && i < lastindex(t) ? i : i - 1)
     else
         i - 1

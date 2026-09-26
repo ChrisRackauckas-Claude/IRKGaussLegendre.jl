@@ -150,3 +150,31 @@ end
     # A dual-valued query at a saved time still flows through the polynomial.
     @test ForwardDiff.derivative(t -> sol(t)[1], 0.5) ≈ exp(0.5) rtol = 1.0e-9
 end
+
+@testset "AD honors `continuity` at saved knots" begin
+    # u' = t^9 makes the one-sided interpolant derivatives differ measurably at
+    # the interior saved points, so a dual-numbered query must pick the same
+    # step as a Float64 `Val{1}` query.
+    poly9!(du, u, p, t) = (du[1] = t^9; nothing)
+    @testset "simd=$simd backwards=$backwards" for simd in (false, true),
+            backwards in (false, true)
+
+        a, b = backwards ? (2.0, 0.0) : (0.0, 2.0)
+        sol = solve(
+            ODEProblem(poly9!, [0.0], (a, b)), IRKGL16(; simd);
+            dt = 1.0, adaptive = false
+        )
+        for tk in sol.t, continuity in (:left, :right)
+            @test ForwardDiff.derivative(t -> sol(t; continuity)[1], tk) ≈
+                sol(tk, Val{1}; continuity)[1] rtol = 1.0e-11 atol = 1.0e-12
+            @test ForwardDiff.derivative(t -> sol(t, Val{1}; continuity)[1], tk) ≈
+                ForwardDiff.derivative(
+                t -> ForwardDiff.derivative(w -> sol(w; continuity)[1], t), tk
+            ) rtol = 1.0e-11 atol = 1.0e-12
+        end
+        tdir = sign(sol.t[end] - sol.t[1])
+        @test_throws ErrorException ForwardDiff.derivative(
+            t -> sol(t)[1], sol.t[end] + tdir
+        )
+    end
+end
